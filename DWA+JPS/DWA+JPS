@@ -1,0 +1,1025 @@
+#! /usr/bin/python3
+# -*- coding: utf-8 -*-
+
+
+"""
+Mobile robot motion planning sample with Dynamic Window Approach
+author: Atsushi Sakai (@Atsushi_twi), Göktuğ Karakaşlı
+"""
+
+"""
+  *Original Code
+  *https://github.com/AtsushiSakai/PythonRobotics/blob/master/PathPlanning/DynamicWindowApproach/dynamic_window_approach.py
+"""
+
+
+
+
+
+
+from cmath import pi
+import sys, math, time
+from this import s
+from xml.etree.ElementTree import PI
+
+from PyQt5.QtCore import *
+from PyQt5.QtWidgets import *
+from PyQt5.QtGui import *
+from PyQt5.Qt import *
+from PyQt5.QtWidgets import QApplication, QGraphicsLineItem, QGraphicsScene, QGraphicsView
+
+from dwa_window import Ui_DWA_Simulator
+
+import numpy as np
+np.seterr(divide='ignore', invalid='ignore')
+import matplotlib.pyplot as plt
+import pandas as pd
+import math
+import sys, time
+import matplotlib.pyplot as plt
+
+#global parameters
+goal_from_picture_x = 10   #####################################################################################################
+goal_from_picture_y = 10   #######################################################################################################   이것들이 목적지의 최종 좌표들이다.
+sampling_interval = 0.1
+trackingVisited=np.zeros((11,11))
+
+def min_max_normalize(data):
+    
+    data = np.array(data)     #################함수에 들어온 데이터들을 numpy형식으로 변환시켜준다.
+    ##print(data)
+    max_data = max(data)       ######################   데이터들 중에 제일 큰 값을 반환시킨다.
+    min_data = min(data)         #########################데이터들 중에 제일 작은 값을 반환시킨다.
+
+    if max_data - min_data == 0:
+        data = [0.0 for i in range(len(data))]
+    else:
+        data = (data - min_data) / (max_data - min_data)
+        
+    #print(data)
+    return data
+def angle_range_corrector(angle):
+
+    if angle > math.pi:
+        while angle > math.pi:
+            angle -=  2 * math.pi
+    elif angle < -math.pi:
+        while angle < -math.pi:
+            angle += 2 * math.pi
+    if angle==-math.pi:
+        angle=0
+
+    return angle
+def write_circle(center_x, center_y, angle, circle_size=0.2):
+    
+    circle_x = [] 
+    circle_y = []
+
+    steps = 100
+    for i in range(steps):
+        circle_x.append(center_x + circle_size*math.cos(i*2*math.pi/steps))
+        circle_y.append(center_y + circle_size*math.sin(i*2*math.pi/steps))
+
+    circle_line_x = [center_x, center_x + math.cos(angle) * circle_size]
+    circle_line_y = [center_y, center_y + math.sin(angle) * circle_size]
+
+    return circle_x, circle_y, circle_line_x, circle_line_y
+class Path():
+    def __init__(self, u_th, u_v): 
+        self.x = None
+        self.y = None
+        self.th = None
+        self.u_v = u_v
+        self.u_th = u_th
+#############################################현재 있는 위치와 각속도를 할당해주는 Class이다.
+
+class Obstacle():
+    def __init__(self, y, x, size):
+        self.x = x
+        self.y = y
+        self.size = size
+class Middle():
+    def __init__(self,x,y,size):
+        self.x=x
+        self.y=y
+        self.size=size
+
+
+
+######################################################################################################################
+class Two_wheeled_robot():
+    def __init__(self, init_x, init_y, init_th):
+        
+        #initialization
+        self.x = init_x
+        self.y = init_y
+        self.th = init_th
+        self.u_v = 0.0
+        self.u_th = 0.0
+
+        self.traj_x = [init_x]
+        self.traj_y = [init_y]
+        self.traj_th = [init_th]
+        self.traj_u_v = [0.0]
+        self.traj_u_th = [0.0]
+
+    def update_state(self, u_th, u_v, dt):
+
+        self.u_th = u_th
+        self.u_v = u_v
+
+        next_x = self.u_v * math.cos(self.th) * dt + self.x   ###########속도*x방향의 거리*시간간격+원래 x거리
+        next_y = self.u_v * math.sin(self.th) * dt + self.y   ##############속도*y방향의 거리* 시간간격+원래 y 거리
+        next_th = self.u_th * dt + self.th     ###############################선수각속도*시간간격+선수각
+
+        self.traj_x.append(next_x)
+        self.traj_y.append(next_y)
+        self.traj_th.append(next_th)
+
+        self.x = next_x
+        self.y = next_y
+        self.th = next_th
+
+        return self.x, self.y, self.th
+
+
+
+
+
+
+class Simulator_DWA_robot():
+    def __init__(self):
+
+        # two wheeled robot
+        self.max_accelation = 1                #######################로봇이 가질 수 있는 최대 가속도
+        self.max_ang_accelation = 100 * math.pi /180 ##############################로봇이 가질 수 있는 최대 각속도
+        self.lim_max_velo = 1.6 # m/s               ############################로봇이 가질 수 있는 최대 속도
+        self.lim_min_velo = 0.0 # m/s            #############################로봇이 가질 수 있는 최소 속도
+        self.lim_max_ang_velo = math.pi #####################################로봇이 가질 수 있는 최대 각속도
+        self.lim_min_ang_velo = -math.pi        ###########################로봇이 가질 수 있는 최대 각속도
+
+    def predict_state(self, ang_velo, velo, x, y, th, dt, pre_step):
+        next_xs = []
+        next_ys = []
+        next_ths = []
+
+        for i in range(pre_step):
+            temp_x = velo * math.cos(th) * dt + x ###############################이 값은 결정된 속도로 움직였을 때 dt초 후에 있게 될 위치의 X좌표이다.
+            temp_y = velo * math.sin(th) * dt + y ###############################이 값은 결정된 속도로 움직였을 때 dt초 후에 있게 될 위치의 y좌표이다.
+            temp_th = ang_velo * dt + th    #####################################이 값은 결정된 각속도로 움직였을 때 dt초 후에 바라보게될 선수각이다.
+
+            next_xs.append(temp_x)        
+            next_ys.append(temp_y)
+            next_ths.append(temp_th)
+                             #######################################################이 부분에서 예측 좌표와 선수각을 저장해두었다.
+            x = temp_x
+            y = temp_y
+            th = temp_th
+
+        return next_xs, next_ys, next_ths
+         #######################################################반환되는 값들은 다음으로 가게 된 좌표,선수각의 후보들이 담긴 리스트들이다.
+
+
+
+
+
+
+
+# DWA
+class DWA():
+    def __init__(self):
+        global sampling_interval
+
+        self.simu_robot = Simulator_DWA_robot()
+        #####################################################이 부분에서  반환된 값들은 가게 될 좌표와 배가 향하게 될 선수각들의 후보 꾸러미들이다.  
+
+        self.pre_time = 3        #######################예측 경로로써 볼 미래는 3초이다.
+        self.pre_step = 30       #########################3초를 탐색할 때 몇번 탐색할까의 값이다.
+        self.delta_velo = 0.02   #########################속도의 범위를 탐색할 때의 탐색 단위이다.
+        self.delta_ang_velo = 0.02      #######################각속도의 범위를 탐색할 때의 탐색 단위이다.
+
+        # define weight
+        self.weight_angle = 0.5
+        self.weight_velo = 100
+        self.weight_obs = 0
+
+        self.area_dis_to_obs = 5
+
+        self.traj_paths = []
+        self.traj_opt = []
+
+    def calc_input(self, g_x, g_y, state, obstacles):
+        # create path
+        paths = self._make_path(state)
+        # evaluate path
+        opt_path = self._eval_path(paths, g_x, g_y, state, obstacles)#############################가장 이상적인 경로 하나가 반환되었다.
+        #print(opt_path)
+        self.traj_opt.append(opt_path)######################################################계산된 이상적인 경로를 저장해둔다.
+
+        return paths, opt_path          ########################경로후보들과 최종 경로를 반환해준다.
+
+    def _make_path(self, state): 
+        # calculate range of velocity and angular velocity
+        min_ang_velo, max_ang_velo, min_velo, max_velo = self._calc_range_velos(state) ##############################값들이 다 알맞게 할당되었다.
+
+        # list of all paths
+        paths = []
+
+        # evaluate all velocities and angular velocities combinations
+        for ang_velo in np.arange(min_ang_velo, max_ang_velo, self.delta_ang_velo):
+            for velo in np.arange(min_velo, max_velo, self.delta_velo):          ##############################각속도와 속도의 범위 내에서의 경로들을 하나하나 탐색해보는 과정이다.
+                path = Path(ang_velo, velo)     #################################    현재 위치하고 있는좌표의 정보!!와 그에 대한 속도, 각속도 값이 저장되었다.
+
+                next_x, next_y, next_th \
+                    = self.simu_robot.predict_state(ang_velo, velo, state.x, state.y, state.th, sampling_interval, self.pre_step)  ##############예측 경로의 좌표와 선수각이 할당되었다.
+
+                path.x = next_x           ####################후보의 X좌표
+                path.y = next_y            ###################후보의 Y좌표
+                path.th = next_th           #################후보의 선수각
+
+                # add path
+                paths.append(path)          #################후보 좌표와 선수각의 정보 꾸러미를 저장해둔다.
+                
+
+        # save tha path
+        self.traj_paths.append(paths)        ###################후보좌표의 선수각의 정보 꾸러미들이 담긴 그릇을 저장해두었다ㅏ.
+
+        return paths
+#################################################################################예상 경로의 정보들이 반환되었다.
+        
+
+    def _calc_range_velos(self, state): # calculate range of velocity and angular velocity
+        # angular velocity
+        range_ang_velo = sampling_interval * self.simu_robot.max_ang_accelation      ######################각이 움직일 수 있는 최대값
+        min_ang_velo = state.u_th - range_ang_velo       ######################각속도의 최소 범위
+        max_ang_velo = state.u_th + range_ang_velo       ######################각속도의 최대 범위
+        # minimum
+        if min_ang_velo < self.simu_robot.lim_min_ang_velo:
+            min_ang_velo = self.simu_robot.lim_min_ang_velo ############최소 각가속도로 줄였을 때 예측되는 각속도가 하드웨어의 최소각속도보다 작을 경우 각속도의 최소범위는 하드웨어가 낼 수 있는 최소각속도로 여겨진다.
+        # maximum
+        if max_ang_velo > self.simu_robot.lim_max_ang_velo:
+            max_ang_velo = self.simu_robot.lim_max_ang_velo ############최대 각가속도로 늘렸을 때 예측되는 각속도가 하드웨어의 최대각속도보다 작을 경우 각속도의 최대범위는 하드웨어가 낼 수 있는 최대각속도로 여겨진다.
+
+        # velocity
+        range_velo = sampling_interval * self.simu_robot.max_accelation  ###############하드웨어가 낼 수 있는 최대 가속도로 작용되었을 때 변화될 수 있는 최대값이다.
+        min_velo = state.u_v - range_velo        ####################속도의 범위 중에서 최소 속도이다
+        max_velo = state.u_v + range_velo        ####################속도의 범위 중에서 최대 속도이다.
+        # minimum
+        if min_velo < self.simu_robot.lim_min_velo:
+            min_velo = self.simu_robot.lim_min_velo ############최소 가속도로 줄였을 때 예측되는 속도가 하드웨어의 최소속도보다 작을 경우 속도의 최소범위는 하드웨어가 낼 수 있는 최소속도로 여겨진다.
+        # maximum
+        if max_velo > self.simu_robot.lim_max_velo:
+            max_velo = self.simu_robot.lim_max_velo ##########최대 가속도로 늘렸을 때 예측되는 속도가 하드웨어의 최대속도보다 클 경우 속도의 범위에서 최대속도는 하드웨어가 낼 수 있는 최대속도로 여겨진다.
+
+        return min_ang_velo, max_ang_velo, min_velo, max_velo     ############################# 속도와 각속도의 범위가 반환된다.
+
+    def _eval_path(self, paths, g_x, g_y, state, obastacles):
+        # detect nearest self.obstacle
+        nearest_obs = self._calc_nearest_obs(state, obastacles)  ####################################고려해줘야할 장애물들을 받아온다.
+
+        score_heading_angles = []
+        score_heading_velos = []
+        score_obstacles = []
+
+        # evaluate all pathes
+        for path in paths:
+            # (1) heading_angle
+            score_heading_angles.append(self._heading_angle(path, g_x, g_y))  ############################## path의 heading의 cost값을 구해준다.   
+            # (2) heading_vel
+            score_heading_velos.append(self._heading_velo(path))               ###################################path의 velocity의 cost값을 구해준다.
+            # (3) obstacle
+            score_obstacles.append(self._obstacle(path, nearest_obs))          ###################################obstacle의 velocity의 cost값을 구해준다.
+
+        # normalization
+        for scores in [score_heading_angles, score_heading_velos, score_obstacles]:
+            ##print(scores)
+            scores = min_max_normalize(scores)
+
+        score = 0.0
+
+        for k in range(len(paths)):
+            temp_score = 0.0
+
+            temp_score = self.weight_angle * score_heading_angles[k] + \
+                         self.weight_velo * score_heading_velos[k] + \
+                         self.weight_obs * score_obstacles[k]
+                         ##################################################################모든 cost값들을 더해주어 최종 Cost값을 구하였다.
+
+            if temp_score > score:
+                opt_path = paths[k]########################################최종 Cost값이 가장 큰 경score_obstacles우의 경로를 이상적인 경로라고 설정해둔다.
+                score = temp_score##############################################이상적인 경우를 계속 갱신해준다.
+
+        try:
+            return opt_path      ############################################################이상적인 경로를 반환해준다.
+        except:
+            ret = QMessageBox.information(None, "message", "Can not calculate optimal path!", QMessageBox.Ok)
+
+    def _heading_angle(self, path, g_x, g_y):
+
+        last_x = path.x[-1]         ####################################경로의 끝의 x좌표를 받아온다.
+        last_y = path.y[-1]         ####################################경로의 끝의 y좌표를 받아온다.
+        last_th = path.th[-1]       #####################################경로의 끝의 선수각을 받아온다.
+
+        # calculate angle
+        angle_to_goal = math.atan2(g_y-last_y, g_x-last_x)####################################경로의 끝과 배의 현재 위치와의 각도를 구해준다.
+
+        # calculate score
+        score_angle = angle_to_goal - last_th  
+        if score_angle==-math.pi:
+            score_angle=0        
+        score_angle = abs(angle_range_corrector(score_angle))    ###################################현재의 선수각과 내가 향해야 할 선수각의 차이를 계산해준다.
+        score_angle = math.pi - score_angle         ##############################    angle의 cost값을 구해준다.
+
+        return score_angle
+        #####################################################################angle의 cost를 반환해준다.
+
+    def _heading_velo(self, path):
+
+        score_heading_velo = path.u_v
+
+        return score_heading_velo
+    ###############################################################velocity의 cost를 반환해준다.
+
+    def _calc_nearest_obs(self, state, obstacles):
+        nearest_obs = []
+
+        for obs in obstacles:
+            temp_dis_to_obs = math.sqrt((state.x - obs.x) ** 2 + (state.y - obs.y) ** 2) ####################################장애물과 현재의 위치의 거리를 계산하였다.
+
+            if temp_dis_to_obs < self.area_dis_to_obs :
+                nearest_obs.append(obs)            ####################################이 거리가 일정수준보다 가까우면 고려해야될 대상으로 판단해준다.
+
+        
+        return nearest_obs
+
+    def _obstacle(self, path, nearest_obs):
+        # obstacle avoidance
+        score_obstacle = 0
+        temp_dis_to_obs = 0.0
+
+        for i in range(len(path.x)):
+            for obs in nearest_obs: 
+                temp_dis_to_obs = math.sqrt((path.x[i] - obs.x) * (path.x[i] - obs.x) + (path.y[i] - obs.y) *  (path.y[i] - obs.y))   #######################예측 경로와 장애물과의 거리를 구한다.
+
+                if temp_dis_to_obs < score_obstacle:
+                    score_obstacle = temp_dis_to_obs #the nearest obstacle    #########################가장 현재의 배와 거리가 가까운 장애물을 구한다.
+
+                # collision with obstacl
+                # if temp_dis_to_obs < obs.size + 0.75: #0.75 is the margin
+                #     score_obstacle = -float(0.7)
+                #     break
+            ################################################################예측경로의 위치와 장애물과의 위치가 겹친다면 고려대상에서 제외해주는 부분이다.
+            else:
+                continue
+
+            break
+
+        return score_obstacle
+        ########################################################obstacle의 cost값을 구해주었다.
+
+
+
+
+
+
+
+
+
+
+class Const_goal():
+    def __init__(self):
+        self.traj_g_x = []
+        self.traj_g_y = []
+
+    def calc_goal(self, time_step):
+        global goal_from_picture_x, goal_from_picture_y
+        g_x  = goal_from_picture_x
+        g_y = goal_from_picture_y
+
+        self.traj_g_x.append(g_x)
+        self.traj_g_y.append(g_y)
+
+        return g_x, g_y
+        ######################################목적지 만들기
+
+
+
+
+
+
+
+
+
+class JPS():
+    def __init__(self,Goal):
+        self.plot1=np.zeros((11,11))
+        self.visited=np.copy(self.plot1)
+        self.preNode=[[(11,11) for i in range(self.plot1.shape[1])] for j in range(self.plot1.shape[0])]
+        #print(preNode)
+        self.obstacle=np.zeros((11,11))
+        self.Hcost=np.copy(self.plot1)
+        self.Gcost=np.copy(self.plot1)
+        self.cost=[]
+        self.List1=[]
+        self.List2=[]
+        self.List3=[]
+        self.List4=[]
+        self.ImportL=[]
+        self.ImportLnotSame=[]
+        self.ListCost=[]
+        self.PickList=[]
+        self.inputY=0
+        self.inputX=0
+        self.preX=0
+        self.PreY=0
+        self.dy=[-1,-1,0,1,1,1,0,-1]
+        self.dx=[0,1,1,1,0,-1,-1,-1]
+        self.endY=10
+        self.endX=10
+        self.StartY=0   
+        self.StartX=0
+        self.pathB=[]
+
+
+
+
+    def go1(self,y,x,i,PY,PX): ########################SearchN탐색
+        searchN=0
+        PreX=PX
+        PreY=PY
+        ny=y
+        nx=x
+
+        while (ny >= 0 and ny < self.plot1.shape[0] and nx >= 0 and nx < self.plot1.shape[1]): 
+                ny=ny+self.dy[i]
+                nx=nx+self.dx[i]
+                if ( ny >= 0 and ny < self.plot1.shape[0] and nx >= 0 and nx < self.plot1.shape[1] and self.obstacle[ny, nx]== 0):
+                    searchN+=1
+                    if self.preNode[ny][nx]==(11,11):
+                        self.preNode[ny][nx]=(y,x)
+                        #visited[ny][nx]=1
+
+                else:
+                    ny=ny-self.dy[i]
+                    nx=nx-self.dx[i]
+                    break
+                if(ny==self.endY and nx==self.endX):
+                    self.ImportLnotSame.insert(0,(ny,nx))
+                    break
+                #visited[ny][nx]=1
+        #visited[ny][nx]=0
+        if (ny >= 0 and ny < self.plot1.shape[0] and nx >= 0 and nx < self.plot1.shape[1]): 
+            ny=y
+            nx=x
+            if i==0:
+                self.List1.append((searchN,(ny,nx),(PreY,PreX)))
+            if i==2:
+                self.List2.append((searchN,(ny,nx),(PreY,PreX)))
+            if i==4:
+                self.List3.append((searchN,(ny,nx),(PreY,PreX)))
+            if i==6:
+                self.List4.append((searchN,(ny,nx),(PreY,PreX)))
+        if(ny==self.endY and nx==self.endX):
+            self.ImportLnotSame.insert(0,(ny,nx)) 
+
+
+    def go3(self,y,x,i,PY,PX): #####################################go1함수에서 List들에 append가 아닌 insert를 넣어야하는 경우를 고려한 함수, 그 이외의 차이X
+        searchN=0
+        PreX=PX
+        PreY=PY
+        ny=y
+        nx=x  
+        while ny >= 0 and ny < self.plot1.shape[0] and nx >= 0 and nx < self.plot1.shape[1]: 
+                ny=ny+self.dy[i]
+                nx=nx+self.dx[i]
+                if ( ny >= 0 and ny < self.plot1.shape[0] and nx >= 0 and nx < self.plot1.shape[1] and self.obstacle[ny, nx]== 0):               
+                        searchN+=1
+                        if self.preNode[ny][nx]==(11,11):
+                            self.preNode[ny][nx]=(y,x)
+                        #visited[ny][nx]=1
+
+                else:
+                    ny=ny-self.dy[i]
+                    nx=nx-self.dx[i]
+                    break
+        #visited[ny][nx]=0
+        if (ny >= 0 and ny < self.plot1.shape[0] and nx >= 0 and nx < self.plot1.shape[1]): 
+            ny=y
+            nx=x  
+            if i==0:
+                self.List1.insert(0,(searchN,(ny,nx),(PreY,PreX)))
+            if i==2:
+                self.List2.insert(0,(searchN,(ny,nx),(PreY,PreX)))
+            if i==4:
+                self.List3.insert(0,(searchN,(ny,nx),(PreY,PreX)))
+            if i==6:
+                self.List4.insert(0,(searchN,(ny,nx),(PreY,PreX)))
+
+    def go2(self,y,x,i): #################################################################대각선 방향으로 탐색
+        PreX=x
+        PreY=y
+        ny=y
+        nx=x
+        while (ny >= 0 and ny < self.plot1.shape[0] and nx >= 0 and nx < self.plot1.shape[1]):
+                ny+=self.dy[i]
+                nx+=self.dx[i]
+                if (ny>=0 and ny < self.plot1.shape[0] and nx >= 0 and nx < self.plot1.shape[1] and self.obstacle[ny, nx]== 0):
+                    # if (visited[ny, nx] == 1):
+                    #     break         
+                    if self.preNode[ny][nx]==(11,11):
+                        self.preNode[ny][nx]=(PreY,PreX)
+                    if i==1:
+                        self.go1(ny,nx,0,PreY,PreX)
+                        self.go1(ny,nx,2,PreY,PreX)
+                    if i==3:
+                        #print('a')
+                        self.go3(ny,nx,2,PreY,PreX)
+                        self.go1(ny,nx,4,PreY,PreX)
+                    if i==5:
+                        self.go3(ny,nx,4,PreY,PreX)
+                        self.go1(ny,nx,6,PreY,PreX)
+                    if i==7:
+                        self.go3(ny,nx,6,PreY,PreX)
+                        self.go3(ny,nx,0,PreY,PreX)
+                    #visited[ny][nx]=1
+                elif (ny>=0 and ny < self.plot1.shape[0] and nx >= 0 and nx < self.plot1.shape[1] and self.obstacle[ny, nx]== 1):
+                    if i==1:
+                        self.List1.append((-1,(ny,nx),(PreY,PreX)))
+                        self.List2.append((-1,(ny,nx),(PreY,PreX)))
+                    elif i==3:
+                        self.List2.insert(0,(-1,(ny,nx),(PreY,PreX)))
+                        self.List3.append((-1,(ny,nx),(PreY,PreX)))
+                    elif i==5:
+                        self.List3.insert(0,(-1,(ny,nx),(PreY,PreX)))
+                        self.List4.append((-1,(ny,nx),(PreY,PreX)))
+                    else:
+                        self.List4.insert(0,(-1,(ny,nx),(PreY,PreX)))
+                        self.List1.insert(0,(-1,(ny,nx),(PreY,PreX)))
+                    break
+                else:
+                    ny=ny-self.dy[i]
+                    nx=nx-self.dx[i]
+                    if self.preNode[ny][nx]==(11,11):
+                        self.preNode[ny][nx]=(PreY,PreX)
+                        #self.visited[ny][nx]=1
+                    # ImportLX.append(nx)
+                    # ImportLY.append(ny)
+                    break
+
+    def jps(self,y,x):   #######################jps실행
+        self.visited[y][x]=1
+        if(y >= 0 and y < self.plot1.shape[0] and x >= 0 and x < self.plot1.shape[1]):
+            self.go1(y,x,0,y,x)
+            self.go1(y,x,2,y,x)
+            self.go1(y,x,4,y,x)
+            self.go1(y,x,6,y,x)
+            self.go2(y,x,1)
+            self.go2(y,x,3)
+            self.go2(y,x,5)
+            self.go2(y,x,7)
+
+    def ImportantNode(self): #####################################################주변 노드 간의 SearchN의 길이 값들의 차를 구하는 함수
+        for i in range(len(self.List1)-1):
+            if self.List1[i][0]-self.List1[i+1][0]>1 and self.visited[self.List1[i+1][1][0]-self.List1[i+1][0]-1][self.List1[i][1][1]]==0 and self.obstacle[self.List1[i+1][1][0]-self.List1[i+1][0]-1][self.List1[i][1][1]]==0:
+                self.ImportL.append((self.List1[i+1][1][0]-self.List1[i+1][0]-1,self.List1[i][1][1]))
+            elif self.List1[i][0]-self.List1[i+1][0]<-1 and self.visited[self.List1[i][1][0]-self.List1[i][0]-1][self.List1[i+1][1][1]]==0 and self.obstacle[self.List1[i][1][0]-self.List1[i][0]-1][self.List1[i+1][1][1]]==0:
+                self.ImportL.append((self.List1[i][1][0]-self.List1[i][0]-1,self.List1[i+1][1][1]))
+                #print(i)
+        for i in range(0,len(self.List1)):
+            self.List1.pop(0)
+            
+        for i in range(len(self.List2)-1):
+            #print(i)
+            if self.List2[i][0]-self.List2[i+1][0]>1 and self.visited[self.List2[i][1][0]][self.List2[i+1][1][1]+self.List2[i+1][0]+1]==0 and self.obstacle[self.List2[i][1][0]][self.List2[i+1][1][1]+self.List2[i+1][0]+1]==0:
+                self.ImportL.append((self.List2[i][1][0],self.List2[i+1][1][1]+self.List2[i+1][0]+1))
+            elif self.List2[i][0]-self.List2[i+1][0]<-1 and self.visited[self.List2[i+1][1][0]][self.List2[i][1][1]+self.List2[i][0]+1]==0 and self.obstacle[self.List2[i+1][1][0]][self.List2[i][1][1]+self.List2[i][0]+1]==0:
+                self.ImportL.append((self.List2[i+1][1][0],self.List2[i][1][1]+self.List2[i][0]+1))
+        for i in range(0,len(self.List2)):
+            self.List2.pop(0)
+        
+        for i in range(len(self.List3)-1):
+            if self.List3[i][0]-self.List3[i+1][0]>1 and self.visited[self.List3[i+1][1][0]+self.List3[i+1][0]+1][self.List3[i][1][1]]==0 and self.obstacle[self.List3[i+1][1][0]+self.List3[i+1][0]+1][self.List3[i][1][1]]==0:
+                self.ImportL.append((self.List3[i+1][1][0]+self.List3[i+1][0]+1,self.List3[i][1][1]))
+            elif self.List3[i][0]-self.List3[i+1][0]<-1 and self.visited[self.List3[i][1][0]+self.List3[i][0]+1][self.List3[i+1][1][1]]==0 and self.obstacle[self.List3[i][1][0]+self.List3[i][0]+1][self.List3[i+1][1][1]]==0:
+                self.ImportL.append((self.List3[i][1][0]+self.List3[i][0]+1,self.List3[i+1][1][1]))
+        for i in range(0,len(self.List3)):
+            self.List3.pop(0)
+
+        for i in range(len(self.List4)-1):
+            if self.List4[i-1][0]-self.List4[i][0]>1 and self.visited[self.List4[i-1][1][0]][self.List4[i][1][1]-self.List4[i][0]-1]==0 and self.obstacle[self.List4[i-1][1][0]][self.List4[i][1][1]-self.List4[i][0]-1]==0:
+                self.ImportL.append((self.List4[i-1][1][0],self.List4[i][1][1]-self.List4[i][0]-1))
+            elif self.List4[i-1][0]-self.List4[i][0]<-1 and self.visited[self.List4[i][1][0]][self.List4[i-1][1][1]-self.List4[i-1][0]-1]==0 and self.obstacle[self.List4[i][1][0]][self.List4[i-1][1][1]-self.List4[i-1][0]-1]==0:
+                self.ImportL.append((self.List4[i][1][0],self.List4[i-1][1][1]-self.List4[i-1][0]-1))
+        for i in range(0,len(self.List4)):
+            self.List4.pop(0)
+        for value in self.ImportL:
+            if value not in self.ImportLnotSame:
+                if self.visited[value[0]][value[1]]==0:
+                    self.ImportLnotSame.append(value)
+        for i in range(0,len(self.ImportLnotSame)-1):
+            if self.ImportLnotSame[i]==(self.endY,self.endX):
+                self.ImportLnotSame[0],self.ImportLnotSame[i]=self.ImportLnotSame[i],self.ImportLnotSame[0]
+
+    def search(self,y,x):
+        if(y >= 0 and y < self.plot1.shape[0] and x >= 0 and x < self.plot1.shape[1]):   
+            a = abs(self.endY - (y))
+            b = abs(self.endX - (x))
+            if(a >= b):
+                self.Hcost[y][x]= b*14 + (a-b)*10
+            else:
+                self.Hcost[y][x]= a*14 + (b-a)*10
+            c=abs(self.preNode[y][x][0]-y)
+            d=abs(self.preNode[y][x][1]-x)
+            if(c >= d):
+                self.Gcost[y][x]= d*14 + (c-d)*10
+            else:
+                self.Gcost[y][x]= d*14 + (c-d)*10
+        self.cost.append(self.Hcost[y][x]+ self.Gcost[y][x])
+        ###############################################################################################cost값계산
+
+    def RealMain(self,y,x):
+        self.jps(y,x)
+        self.ImportantNode()
+        inputY=self.ImportLnotSame[0][0]
+        inputX=self.ImportLnotSame[0][1]
+        self.ImportLnotSame
+        self.PickList.append((inputY,inputX))
+        PreX=x
+        PreY=y
+        while inputY!=self.endY or inputX!=self.endX:
+            self.jps(inputY,inputX)
+            self.ImportantNode()
+            for i in range(len(self.ImportLnotSame)):
+                self.search(self.ImportLnotSame[i][0],self.ImportLnotSame[i][1])
+                self.ListCost.append(self.cost[i])
+            for i in range(len(self.ImportLnotSame)-1):
+                if self.ListCost[i]>self.ListCost[i+1]:
+                    self.ListCost[i+1],self.ListCost[i]=self.ListCost[i],self.ListCost[i+1]
+                    self.ImportLnotSame[i+1],self.ImportLnotSame[i]=self.ImportLnotSame[i],self.ImportLnotSame[i+1]
+                    for j in range(i,0,-1):#
+                        if self.ListCost[j]<self.ListCost[j-1]:
+                            self.ListCost[j],self.ListCost[j-1]=self.ListCost[j+1],self.ListCost[j]
+                            self.ImportLnotSame[j],self.ImportLnotSame[j-1]=self.ImportLnotSame[j-1],self.ImportLnotSame[j]###############중복되는 점 고려를 위한 부분  
+            PreY=inputY
+            PreX=inputX                
+            inputY=self.ImportLnotSame[0][0]
+            inputX=self.ImportLnotSame[0][1]
+            self.PickList.append((inputY,inputX))
+            self.ImportLnotSame.pop(0)
+            if inputY==self.endY and inputX==self.endX:
+                self.visited[inputY][inputX]=1   
+            # print(self.ImportLnotSame)   
+    # RealMain(0,0)
+    def backtracking(self,y,x):
+        #print(self.preNode)
+        ny=self.preNode[y][x][0]
+        nx=self.preNode[y][x][1]
+        #print("ny:%d  /\   nx:%d",(ny,nx))
+        self.plot1[ny][nx]=88
+        self.plot1[self.endY][self.endY]=88
+        self.pathB.insert(0,(ny,nx))
+        if ny==self.StartY and nx==self.StartX:
+            return 100
+        self.backtracking(ny,nx)
+    
+    def Run(self):
+        self.RealMain(0,0)
+        self.pathB.append((self.endY,self.endX))
+        self.backtracking(self.endY,self.endX)
+        print(self.obstacle)
+    #backtracking(self.endY,self.endX)
+    # print(self.preNode)
+
+
+
+
+
+
+
+
+
+
+
+
+class PID():
+    def __init__(self,Goal):
+        self.Answer=Goal
+        self.answer=Goal
+        self.now=0
+        self.dt=0.1
+        self.error_sum=0
+        self.error_past=0
+        self.delta=0
+
+        self.kp=0.9
+        self.kd=0.01
+        self.ki=0.3
+
+
+
+
+class Main_controller():
+
+    new_goal_flag = False
+
+    def __init__(self):
+
+        self.robot = Two_wheeled_robot(0.0, 0.0, 0.0)
+        self.goal_maker = Const_goal()
+        self.controller = DWA()
+        #self.obstacles =[Obstacle(5, 5, 0.25), Obstacle(7, 4, 0.25),  Obstacle(4, 3, 0.25), Obstacle(3, 6, 0.25),  Obstacle(9, 9, 0.25)]
+        self.obstacles =[Obstacle(4, 4, 0.25), Obstacle(5, 4, 0.25),  Obstacle(1, 5, 0.25), Obstacle(8, 9, 0.25),  Obstacle(9, 7, 0.25)]
+        #self.obstacles =[Obstacle(5, 5, 0.25), Obstacle(5, 6, 0.25),  Obstacle(4, 7, 0.25), Obstacle(3, 8, 0.25),  Obstacle(9, 9, 0.25)]
+        self.obstacleList=[(4,4),(5,4),(1,5),(8,9),(9,7)]
+        self.jps=JPS(10)
+        self.middles=[]
+        self.RoadList=[]
+        self.psi_error_th_sum=0
+        self.psi_error_th_past=0
+        self.psi_error_v_sum=0
+        self.psi_error_v_past=0
+        for i in range(0,10):
+            for j in range(0,10):
+                if (i,j) in self.obstacleList:
+                    self.jps.obstacle[i][j]=1
+        self.jps.Run()
+        for i in range(len(self.jps.ImportLnotSame)):
+            if trackingVisited[self.jps.ImportLnotSame[0][0]][self.jps.ImportLnotSame[0][1]]==1:
+                self.jps.ImportLnotSame.pop(i)
+        # print(self.jps.ImportLnotSame)
+        for i in range(0,len(self.jps.pathB)):
+            self.middles.append((self.jps.pathB[i][1],self.jps.pathB[i][0],0.25))
+
+
+    def run_to_goal(self, time_step, goal_flag):
+        global sampling_interval
+        
+        print(self.jps.pathB)
+        #print(self.jps.ImportLnotSame)
+        if(goal_flag == False):
+            if (len(self.jps.pathB)==0):
+                self.jps.pathB.append((10,10))
+            g_x, g_y = self.goal_maker.calc_goal(time_step)
+
+            # input from controller
+            paths, opt_path = self.controller.calc_input(self.jps.pathB[0][1], self.jps.pathB[0][0], self.robot, self.obstacles) ######################## 최대한 목적지로 향하는 경로들을 생성
+
+            pidrun_th=PID(opt_path.u_th)
+            psi_error_th=pidrun_th.answer-self.robot.u_th
+            # pidrun_th.kp=pidrun_th.kp*(1/1+psi_error_th)
+            self.psi_error_th_sum=self.psi_error_th_sum+pidrun_th.dt*psi_error_th
+            psi_error_th_dot=(psi_error_th-self.psi_error_th_past)/pidrun_th.dt
+            self.psi_error_th_past=psi_error_th
+            answer_th=pidrun_th.kp * psi_error_th + pidrun_th.ki * self.psi_error_th_sum + pidrun_th.kd * psi_error_th_dot+self.robot.u_th
+            # pidrun_th.answer+=(pidrun_th.Answer-answer_th)*0.5
+
+            pidrun_v=PID(opt_path.u_v)
+            psi_error_v=pidrun_v.answer-self.robot.u_v
+            # pidrun_v.kp=pidrun_v.kp*(1/1+psi_error_v)
+            self.psi_error_v_sum=self.psi_error_v_sum+pidrun_v.dt*psi_error_v
+            psi_error_v_dot=(psi_error_v-self.psi_error_v_past)/pidrun_v.dt
+            self.psi_error_v_past=psi_error_v
+            answer_v=pidrun_v.kp * psi_error_v + pidrun_v.ki * self.psi_error_v_sum + pidrun_v.kd * psi_error_v_dot+self.robot.u_v
+            self.robot.update_state(answer_th, answer_v, sampling_interval)      #######################로봇을 움직여준다.
+
+            # reach the goal?
+            dis_to_goal = np.sqrt((g_x-self.robot.x)**2 + (g_y-self.robot.y)**2)
+            dis_to_middle=np.sqrt((self.jps.pathB[0][1]-self.robot.x)**2+(self.jps.pathB[0][0]-self.robot.y)**2)
+            print(dis_to_middle)
+
+            if dis_to_goal < 0.5:
+                self.new_goal_flag = True
+                print("finished!")
+                return 
+        ###################################################################################일정 범위 안에 들어오면 끝
+        
+            if dis_to_middle<1.63:
+                self.jps.pathB.pop(0)
+                    
+            time_step += 1
+            
+            window.draw(self.robot.traj_x, self.robot.traj_y, self.robot.traj_th, self.goal_maker.traj_g_x, self.goal_maker.traj_g_y, self.controller.traj_paths, self.controller.traj_opt, self.obstacles,self.middles) #draw simulation result
+        return self.new_goal_flag
+
+
+
+
+
+
+
+
+class Simulation_Window(QDialog):
+
+    time_step = 0
+    goal_flag = False
+
+    controller = Main_controller()
+    timer = QTimer()
+
+    def __init__(self,parent=None):
+        super(Simulation_Window, self).__init__(parent)
+        self.ui = Ui_DWA_Simulator()
+        self.ui.setupUi(self)
+
+        #DWA parameters initial values
+        self.ui.pre_time_spinBox.setValue(3)
+        self.ui.pre_step_spinBox.setValue(30)
+        self.ui.vel_delta_SpinBox.setValue(0.02)
+        self.ui.ang_vel_delta_SpinBox.setValue(0.02)
+        self.ui.sampling_interval_SpinBox.setValue(0.1)
+        self.ui.angle_weight_SpinBox.setValue(0.04)
+        self.ui.velocity_weight_SpinBox.setValue(0.2)
+        self.ui.obstacle_weight_SpinBox.setValue(0.1)
+        self.ui.area_dis_to_obs_SpinBox.setValue(5)
+
+        #robot parameters initial values
+        self.ui.Max_Acc_SpinBox.setValue(1)
+        self.ui.Max_Ang_Acc_SpinBox.setValue(100*math.pi/180)
+        self.ui.Max_Vel_SpinBox.setValue(1.6)
+        self.ui.Min_Vel_SpinBox.setValue(0.0)
+        self.ui.Max_Ang_Vel_SpinBox.setValue(math.pi)
+        self.ui.Min_Ang_Vel_SpinBox.setValue(-math.pi)
+
+        self.ui.Possible_passes_spinBox.setValue(8)
+
+    def do_calculations(self):
+        global sampling_interval
+
+        if(self.goal_flag == False):
+            self.goal_flag = self.controller.run_to_goal(self.time_step, self.goal_flag)
+        self.time_step += 1
+
+        if(self.goal_flag == True):
+            self.timer.stop()
+
+        #controller parameters
+        self.controller.controller.pre_time = self.ui.pre_time_spinBox.value()
+        self.controller.controller.pre_step = self.ui.pre_step_spinBox.value()
+        self.controller.controller.delta_velo = self.ui.vel_delta_SpinBox.value()
+        self.controller.controller.delta_ang_velo = self.ui.ang_vel_delta_SpinBox.value()
+        sampling_interval = self.ui.sampling_interval_SpinBox.value()
+        self.controller.controller.weight_angle = self.ui.angle_weight_SpinBox.value()
+        self.controller.controller.weight_velo = self.ui.velocity_weight_SpinBox.value()
+        self.controller.controller.weight_obs = self.ui.obstacle_weight_SpinBox.value()
+        self.controller.controller.area_dis_to_obs = self.ui.area_dis_to_obs_SpinBox.value()
+
+        #robot parameters
+        self.controller.controller.simu_robot.max_accelation = self.ui.Max_Acc_SpinBox.value()
+        self.controller.controller.simu_robot.max_ang_accelation = self.ui.Max_Ang_Acc_SpinBox.value()
+        self.controller.controller.simu_robot.lim_max_velo = self.ui.Max_Vel_SpinBox.value()
+        self.controller.controller.simu_robot.lim_min_velo = self.ui.Min_Vel_SpinBox.value()
+        self.controller.controller.simu_robot.lim_max_ang_velo = self.ui.Max_Ang_Vel_SpinBox.value()
+        self.controller.controller.simu_robot.lim_min_ang_velo = self.ui.Min_Ang_Vel_SpinBox.value()
+
+    def pause(self):
+        self.timer.stop()
+
+    def reset(self):
+        self.controller.robot.traj_x.clear()
+        self.controller.robot.traj_y.clear()
+        self.controller.robot.traj_th.clear()
+        self.controller.goal_maker.traj_g_x.clear()
+        self.controller.goal_maker.traj_g_y.clear()
+        self.controller.controller.traj_paths.clear()
+        self.controller.controller.traj_opt.clear()
+        self.controller.new_goal_flag = False
+        self.controller.goal_flag = False
+        self.goal_flag = False
+        self.time_step = 0
+
+        self.controller.robot.x = 0.0
+        self.controller.robot.y = 0.0
+        self.controller.robot.th = 0.0
+        self.controller.robot.u_v = 0.0
+        self.controller.robot.u_th = 0.0
+        self.controller.robot.traj_x = [0.0]
+        self.controller.robot.traj_y = [0.0]
+        self.controller.robot.traj_th = [0.0]
+        self.controller.robot.traj_u_v = [0.0]
+        self.controller.robot.traj_u_th = [0.0]
+
+    def Start_simulation(self):
+        self.timer.timeout.connect(self.do_calculations)
+        self.timer.start(50)
+
+    def draw(self, traj_x, traj_y, traj_th, goal_x, goal_y, traj_paths, traj_opt, obstacles,middles):
+
+        scale = 0.025 # 1pixel = 0.025m
+        C = 1/scale
+        X_offset = 100
+        Y_offset = 500
+        
+        self.scene = GraphicsScene()
+        self.ui.graphicsView.setScene(self.scene)
+
+        pen_axis = QPen(Qt.black)
+        pen_axis.setWidth(3)
+        self.scene.addLine(QLineF(X_offset, Y_offset, X_offset, X_offset), pen_axis)
+        self.scene.addLine(QLineF(X_offset, Y_offset, Y_offset, Y_offset), pen_axis)
+        pen_axis.setWidth(1)
+        pen_axis.setStyle(Qt.DashLine)
+        self.scene.addLine(QLineF(Y_offset, Y_offset, Y_offset, X_offset), pen_axis)
+        self.scene.addLine(QLineF(X_offset, X_offset, Y_offset, X_offset), pen_axis)
+        self.scene.addLine(QLineF(X_offset, 300, Y_offset, 300), pen_axis)
+        self.scene.addLine(QLineF(300, X_offset, 300, Y_offset), pen_axis)
+
+        item_10 = self.scene.addText("10", QFont('Arial Black', 15, QFont.Light))
+        item_10.setPos(60,90)
+        item_10_2 = self.scene.addText("10", QFont('Arial Black', 15, QFont.Light))
+        item_10_2.setPos(490,500)
+        item_0 = self.scene.addText("0", QFont('Arial Black', 15, QFont.Light))
+        item_0.setPos(70,500)
+
+        ###draw trajectory###
+        pen_traj=QPen(Qt.blue)
+        pen_traj.setStyle(Qt.DashLine)
+        for i in range(len(traj_x) - 1):
+            self.scene.addLine(QLineF(40*traj_x[i] + 100, -40*traj_y[i] + 500, 40*traj_x[i + 1] + 100, -40*traj_y[i + 1] + 500), pen_traj)
+
+        ###draw possible paths###
+        pen_path = QPen()
+        pen_path.setColor(QColor(200, 150, 0))
+        a = len(traj_paths)
+        b = len(traj_paths[a-1])
+
+        N = self.ui.Possible_passes_spinBox.value()
+        interval = int(b / N)
+        for k in range(0, len(traj_paths[a-1])-1, interval):
+            for j in range(len(traj_paths[a-1][b-1].x)-1):
+                self.scene.addLine(QLineF(C*traj_paths[a-1][k].x[j] + X_offset, -C*traj_paths[a-1][k].y[j] + Y_offset, C*traj_paths[a-1][k].x[j+1] + X_offset, -C*traj_paths[a-1][k].y[j+1] + Y_offset), pen_path)
+
+        #draw optimal path
+        pen_opt = QPen(Qt.red)
+        c = len(traj_opt)
+        for n in range(len(traj_opt[c-1].x) - 1):
+            self.scene.addLine(QLineF(C*traj_opt[c-1].x[n] + X_offset, -C*traj_opt[c-1].y[n] + Y_offset, C*traj_opt[c-1].x[n + 1] + X_offset, -C*traj_opt[c-1].y[n + 1] + Y_offset), pen_opt)
+
+        #draw obstacles
+        pen_obstacle = QPen()
+        pen_obstacle.setColor(QColor(200, 0, 150))
+        for p in range(len(obstacles)):
+            obstacle_diameter = C*obstacles[p].size
+            self.scene.addEllipse(C*obstacles[p].x + X_offset - obstacle_diameter/2, -C*obstacles[p].y + Y_offset - obstacle_diameter/2, obstacle_diameter, obstacle_diameter, pen_obstacle, QBrush(QColor(200, 0, 150)))
+        
+        ##draw Middle
+        pen_middle=QPen()
+        pen_middle.setColor(QColor(50,100,50))
+        for i in range(len(middles)):
+            middle_diameter = C*middles[i][2]
+            self.scene.addEllipse(C*middles[i][0]+X_offset-middle_diameter/2,-C*middles[i][1]+Y_offset-middle_diameter/2,middle_diameter,middle_diameter,pen_middle,QBrush(QColor(0,100,150)))
+        ###draw the robot #40 = 1/0.025###
+        X = traj_x[self.time_step]
+        Y = traj_y[self.time_step]
+        th = traj_th[self.time_step] - math.pi/2
+        
+        robot_vertices = [[C*(X + (- 0.25*math.sin(th))) + X_offset,                      -C*(Y + (0.25*math.cos(th))) + Y_offset], 
+                          [C*(X + (-0.2*math.cos(th) - 0.15*math.sin(th))) + X_offset,    -C*(Y + (-0.2*math.sin(th) + 0.15*math.cos(th))) + Y_offset], 
+                          [C*(X + (-0.2*math.cos(th) - (-0.15)*math.sin(th))) + X_offset, -C*(Y + (-0.2*math.sin(th) - 0.15*math.cos(th))) + Y_offset],
+                          [C*(X + (0.2*math.cos(th) - (-0.15)*math.sin(th))) + X_offset,  -C*(Y + (0.2*math.sin(th) - 0.15*math.cos(th))) + Y_offset], 
+                          [C*(X + (0.2*math.cos(th) - 0.15*math.sin(th))) + X_offset,     -C*(Y + (0.2*math.sin(th) + 0.15*math.cos(th))) + Y_offset]]
+        
+        qpoly_robot = QPolygonF([QPointF(p[0], p[1]) for p in robot_vertices])
+        pen_robot = QPen(Qt.red)
+        pen_robot.setWidth(2)
+        self.scene.addPolygon(qpoly_robot, pen_robot)
+
+        ###draw goal###
+        pen_goal = QPen(Qt.blue)
+        diameter = 16
+        self.scene.addEllipse(C*goal_x[self.time_step] + X_offset - diameter/2, -C*goal_y[self.time_step] + Y_offset - diameter/2, diameter, diameter, pen_goal, QBrush(Qt.green))
+
+
+
+
+
+
+
+
+
+
+class GraphicsScene(QGraphicsScene):
+
+    def __init__(self, parent=None):
+        QGraphicsScene.__init__(self, 0, 0, 600, 600, parent = None)
+        self.opt = ""
+        
+    def mousePressEvent(self, event):
+        global goal_from_picture_x, goal_from_picture_y
+                
+        goal_from_picture_x = (event.scenePos().x() - 100)*0.025
+        goal_from_picture_y = -(event.scenePos().y() - 500)*0.025
+
+
+
+
+
+
+
+
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    window = Simulation_Window()
+    window.show()
+    sys.exit(app.exec_())
+
