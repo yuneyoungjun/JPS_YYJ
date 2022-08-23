@@ -1,8 +1,3 @@
-from ast import Import
-from operator import index
-from re import L
-from tkinter import N
-from typing import List
 import numpy as np
 import math
 import matplotlib.pyplot as plt
